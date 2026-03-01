@@ -1,0 +1,50 @@
+name: 生成 插件市场所需 索引
+
+on:
+  push:
+    paths:
+      - 'Adapter/**'
+      - 'plugins/**'
+  # 关键修复：workflow_dispatch 必须与 push 同级，不能缩进在 push 里面
+  workflow_dispatch: 
+
+# 关键修复：赋予 GITHUB_TOKEN 写入仓库的权限，否则最后的 push 会报 403 错误
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整历史，避免 push 时出现问题
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '14' # 保持你原来的版本，如果项目支持建议升级到 18 或 20
+
+      - name: 安装依赖
+        run: npm install
+
+      - name: 由Actions自动生成插件市场所需JSON索引
+        run: node .github/workflows/generate_index.js
+
+      - name: 提交并推送更改
+        run: |
+          # 配置 git 用户信息
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          
+          # 添加生成的文件
+          git add publicFileIndex.json
+          
+          # 检查是否有文件变动
+          # 如果没有变动，git commit 会报错，所以加上 || echo ... 来忽略错误
+          git commit -m '由Actions自动生成插件市场所需JSON索引' || echo "⚠️ JSON索引无变化，跳过提交"
+          
+          # 推送更改
+          git push
