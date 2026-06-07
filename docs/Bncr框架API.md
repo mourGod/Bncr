@@ -1,10 +1,11 @@
 # Bncr 框架内置 API 完整手册
 
-> 来源：`/bncr/BncrData/@types/Bncr.d.ts`、官方插件、数据库中间件、源码注释
+> 来源：`/bncr/BncrData/@types/Bncr.d.ts`、官方插件、数据库中间件、源码注释、当前容器运行时原型与返回值实测
 > 生成路径：`/bncr/BncrData/docs/Bncr框架API.md`
 >
 > ⚠️ **阅读说明（重要）**
 > - 本文档同时参考了类型声明与运行时插件实现，若两者描述有差异，请以当前版本运行时行为为准。
+> - 类型声明里存在但运行时全局对象未暴露的方法，不再作为可直接调用 API 展开。
 > - 部分 API（如 `sysMethod.isWebLogin`）由官方插件动态注入，未加载对应插件时不可用。
 
 ---
@@ -29,7 +30,8 @@
    - [getSubscriptionUrl — 生成订阅链接](#213-getsubscriptionurlkey-opt)
    - [getDecSubscriptionUrl — 解析订阅链接](#214-getdecsubscriptionurlkey-data)
    - [isWebLogin — 验证 Web Token](#215-isweblogintoken)
-   - [cron — 定时器](#216-cron-定时器)
+   - [cron — 定时器](#216-cron--定时器)
+   - [动态注入方法](#217-动态注入方法)
 3. [BncrDB — 数据库](#三bncrdb--数据库)
    - [构造函数](#31-构造函数)
    - [get — 读取](#32-getkey-def-bool)
@@ -39,6 +41,7 @@
    - [getAllForm — 所有表名](#36-getallform)
    - [watch — 监听变更](#37-watchwatchinfo)
    - [unWatch — 取消监听](#38-unwatchwatchinfo)
+   - [跨数据库实例读取](#39-跨数据库实例读取重点)
 4. [Sender — 插件上下文对象](#四sender--插件上下文对象)
    - [getMsg](#41-getmsg)
    - [setMsg](#42-setmsgmsg)
@@ -51,13 +54,14 @@
    - [getFrom](#49-getfrom)
    - [isAdmin](#410-isadmin)
    - [reply](#411-replymsg)
-   - [delMsg](#412-delmsgmsgidArr)
+   - [delMsg](#412-delmsgmsgidarr)
    - [waitInput](#413-waitinputcallback-time)
-   - [inlineSugar](#414-inlinesugarimsg)
+   - [inlineSugar](#414-inlinesugarmsg)
    - [again](#415-againreplyinfo)
-   - [isWaitDel](#416-iswaitdelargsarr)
+   - [msgInfo](#416-msginfo)
+   - [Bridge](#417-bridge)
 5. [BncrPluginConfig — 插件配置](#五bncrpluginconfig--插件配置)
-6. [BncrCreateSchema — Schema 构建工具](#六bncrcreatesschema--schema-构建工具)
+6. [BncrCreateSchema — Schema 构建工具](#六bncrcreateschema--schema-构建工具)
 7. [Adapter — 适配器](#七adapter--适配器)
 8. [router — 全局路由](#八router--全局路由)
 9. [RunningInformation — 运行信息](#九runninginformation--运行信息)
@@ -76,6 +80,9 @@
 以下变量由框架在**启动时自动注入全局作用域**，插件和模块中**无需 `require`，直接使用即可**。
 
 > ⚠️ 千万不要写 `const BncrDB = require('BncrDB')` 这类代码——这些变量框架已经注入，多余的 require 会报错或取到错误的对象。
+>
+> 说明：这里“无需引入”指的是 `BncrDB` / `sysMethod` 这些**全局变量本身**不需要 `require`。
+> 如果你要读**非默认数据库实例**（如 `pluginConfig`），必须在 `new BncrDB()` 第二参数传对应数据库实例（见 3.9）。
 
 | 全局变量 | 类型 | 说明 |
 |----------|------|------|
@@ -83,11 +90,11 @@
 | `sysMethod` | `object` | 框架核心方法集：定时器、推送、安装包、获取时间等 |
 | `BncrDB` | `class` | K-V 数据库构造器，`new BncrDB('表名')` 即可 |
 | `BncrPluginConfig` | `class` | 插件配置读取器，与 `BncrCreateSchema` 配合使用 |
-| `BncrCreateSchema` | `object` | 插件配置 Schema 构建工具，定义 Web 面板配置表单 |
+| `BncrCreateSchema` | `function/object` | 插件配置 Schema 构建工具，定义 Web 面板配置表单 |
 | `Adapter` | `class` | 适配器构造器，用于接入自定义 IM 平台 |
 | `router` | `express.Router` | Express 路由实例，注册 HTTP / WebSocket 接口 |
-| `RunningInformation` | `object` | 框架运行状态与统计数据（只读） |
-| `DatabaseInstantiationObject` | `object` | 已注册的自定义数据库实例字典（只读） |
+| `RunningInformation` | `object` | 框架运行状态与统计数据，多数只读；`BncrCache` 可作为运行时缓存写入 |
+| `DatabaseInstantiationObject` | `object` | 已注册数据库实例字典，包含框架内置实例和自定义实例（只读） |
 
 ```js
 // ✅ 正确 — 直接用，不需要任何 require
@@ -112,11 +119,17 @@ const sysMethod = require('sysMethod');    // 错误
 如果自行 `require('log4js').getLogger('xxx')` 创建新实例，不会继承框架的 appender，**日志将没有任何输出**。
 
 ```js
-// ✅ 正确写法（优先用框架实例，降级到独立实例）
-const log = BncrJSLogger || require('log4js').getLogger('myModule');
+// ✅ 框架插件/模块内正确写法
+const log = BncrJSLogger;
+
+// ✅ 如果同一文件也要在框架外单独运行调试，必须先用 typeof 判断
+const standaloneLog =
+  typeof BncrJSLogger !== 'undefined'
+    ? BncrJSLogger
+    : require('log4js').getLogger('myModule');
 
 // ❌ 错误写法（框架未配置时无输出）
-const log = require('log4js').getLogger('myModule');
+const badLog = require('log4js').getLogger('myModule');
 ```
 
 ### 方法列表
@@ -130,6 +143,8 @@ const log = require('log4js').getLogger('myModule');
 | `log.warn(...args)` | **黄色** | 警告，重要提示 |
 | `log.error(...args)` | 红色 | 错误信息 |
 | `log.fatal(...args)` | 红色加粗 | 致命错误 |
+| `log.mark(...args)` | 框架 log4js 配置决定 | 标记类日志级别，运行时存在 |
+| `log.log(level, ...args)` | 由 level 决定 | log4js 底层通用日志入口，通常优先用上面的明确级别方法 |
 
 
 ### 输出格式
@@ -142,12 +157,13 @@ const log = require('log4js').getLogger('myModule');
 ### 使用示例
 
 ```js
-const log = BncrJSLogger || require('log4js').getLogger('redis_tool.js');
+const log = BncrJSLogger;
 
 log.warn('redis 链接成功');
 log.error('连接失败:', err.message);
 log.info(`当前版本: ${sysMethod.Version}`);
 log.debug('调试数据:', JSON.stringify(data));
+log.mark('关键流程已到达');
 ```
 
 ---
@@ -165,12 +181,11 @@ log.debug('调试数据:', JSON.stringify(data));
 
 | 属性 | 类型 | 说明 |
 |------|------|------|
-| `sysMethod.Version` | `string` | 框架版本号，如 `"3.1.0"`，可用于判断最低版本兼容 |
+| `sysMethod.Version` | `string` | 框架版本号，当前容器运行时为 `"3.1.2"`，可用于判断最低版本兼容 |
 | `sysMethod.MachineId` | `string` | 当前机器唯一 ID，用于云认证、授权校验等场景 |
 | `sysMethod.WorkMod` | `string` | 运行模式：`'develop'` / `'alpha'` / `'production'` |
 | `sysMethod.systemDir` | `string` | 系统根目录绝对路径，如 `/bncr` |
 | `sysMethod.runWorkDir` | `string` | 数据工作目录路径，通常为 `/bncr/BncrData` |
-| `sysMethod.config` | `object` | `config.json` 完整内容，包含所有系统级配置 |
 | `sysMethod.lock` | `boolean` | `true` 表示系统锁定中，普通命令不被处理 |
 
 
@@ -214,6 +229,8 @@ log.debug('调试数据:', JSON.stringify(data));
 记录通过 `npmInstall` 安装过的包信息，key 为包名。
 
 ```js
+const log = BncrJSLogger;
+
 // 读取框架版本
 log.info('当前框架版本:', sysMethod.Version);
 
@@ -224,7 +241,7 @@ if (sysMethod.WorkMod === 'production') {
 
 // 等框架启动完成后再执行
 sysMethod.createStartupCompletionHook('myInit', async () => {
-  // 此时 systemStatus 均为 true
+  // 启动完成后读取当前模块状态
   log.info('适配器已启动:', sysMethod.systemStatus.adapter);
   log.info('插件已加载:', sysMethod.systemStatus.plugins);
 });
@@ -395,7 +412,7 @@ if (!isPaid) {
   pushInfo.platform  string   必填，目标平台标识（'tgBot'、'qq'、'wechat' 等）
   pushInfo.msg       string   消息文本内容
   pushInfo.userId    string   目标用户 ID（私聊时必填）
-  pushInfo.groupId   string   目标群组 ID（群聊时必填，私聊传 '0'）
+  pushInfo.groupId   string   目标群组 ID（群聊时必填，私聊通常传 '0'；部分适配器可省略）
   pushInfo.path      string   文件路径（发送图片、视频、音频时填写）
   pushInfo.type      string   消息类型：'text'、'image'、'video'、'audio'
   pushInfo.toMsgId   string   要回复的原消息 ID（实现引用回复）
@@ -408,7 +425,7 @@ if (!isPaid) {
 await sysMethod.push({
   platform: 'tgBot',
   userId: '1234567',
-  groupId: '0',       // 私聊固定传 '0'
+  groupId: '0',       // 私聊通常传 '0'
   msg: '你的任务执行完毕'
 });
 
@@ -447,7 +464,7 @@ await sysMethod.push({
 
 ```
 参数：
-  pushInfo.platform  string[]  必填，目标平台标识数组
+  pushInfo.platform  string[]  必填，目标平台标识数组；空数组 [] 表示推送所有已配置管理员平台
   pushInfo.msg       string    必填，消息内容
 
 返回值：Promise<string | boolean>
@@ -456,8 +473,8 @@ await sysMethod.push({
 ```js
 // 通知所有平台管理员
 await sysMethod.pushAdmin({
-  platform: ['tgBot', 'qq'],
-  msg: '⚠️ 服务器 CPU 占用率超过 90%'
+  platform: [],
+  msg: '服务器 CPU 占用率超过 90%'
 });
 
 // 只通知 TG 管理员
@@ -508,6 +525,8 @@ await sysMethod.inline('签到', 'autoBot');
 ```
 
 ```js
+const log = BncrJSLogger;
+
 // 安装并获取结果
 const result = await sysMethod.npmInstall('ioredis');
 if (result.status) {
@@ -557,6 +576,8 @@ await sysMethod.testModule(['ioredis', 'dayjs'], { install: true });
 ```
 
 ```js
+const log = BncrJSLogger;
+
 // 注册启动完成钩子
 sysMethod.createStartupCompletionHook('initRedis', async () => {
   log.info('框架启动完成，开始初始化 Redis 连接...');
@@ -630,8 +651,8 @@ console.log(info.url, info.author, info.team);
 
 返回值：Promise<number>
   1     — Token 有效，已登录
-  3001  — Token 已过期
-  401   — 非法请求/Token 无效
+  3001  — Token 解析失败、已过期，或登录态已失效
+  401   — 非法请求，例如把 refreshToken 当作业务 Token 使用
 ```
 
 ```js
@@ -656,7 +677,7 @@ router.get('/myApi/data', async (req, res) => {
 
 基于 `node-cron` 封装，支持标准 cron 表达式（6 位，秒级精度）。
 
-#### `sysMethod.cron.newCron(expression, callback)`
+#### `sysMethod.cron.newCron(expression, callback, options?)`
 
 **作用：** 创建一个新的定时任务。
 
@@ -664,6 +685,7 @@ router.get('/myApi/data', async (req, res) => {
 参数：
   expression  string    cron 表达式（秒 分 时 日 月 周）
   callback    Function  定时触发时执行的函数
+  options     object    可选，透传给 node-cron
 
 返回值：Task 对象（node-cron 的 ScheduledTask）
   task.stop()   停止该定时任务
@@ -683,6 +705,8 @@ router.get('/myApi/data', async (req, res) => {
 ```
 
 ```js
+const log = BncrJSLogger;
+
 // 每天早上 9:00:00 执行
 const task = sysMethod.cron.newCron('0 0 9 * * *', async () => {
   await sysMethod.pushAdmin({ platform: ['tgBot'], msg: '早安报告' });
@@ -725,9 +749,34 @@ if (!sysMethod.cron.isCron(userInput)) {
 
 ---
 
+### 2.17 动态注入方法
+
+部分官方插件或适配器会在运行时向 `sysMethod` 注入额外方法。这些方法不属于核心类型声明的固定字段，只有对应插件/适配器加载后才可用，调用前应先判断是否存在。
+
+当前代码中可确认的动态方法：
+
+| 方法 | 注入来源 | 说明 |
+|------|----------|------|
+| `sysMethod.isWebLogin(token)` | `plugins/官方插件/webApi.ts` | 校验 Web 管理面板 JWT Token，见 2.15 |
+| `sysMethod.getQqUserInfo(userId)` | `Adapter/qq.js` | 获取指定 QQ 用户信息 |
+| `sysMethod.getQqGroupInfo(groupId)` | `Adapter/qq.js` | 获取指定 QQ 群信息 |
+| `sysMethod.setEssenceMessage(messageId)` | `Adapter/qq.js` | 设置群精华消息 |
+| `sysMethod.delEssenceMessage(messageId)` | `Adapter/qq.js` | 取消群精华消息 |
+| `sysMethod.setGroupTodo(groupId, messageId?)` | `Adapter/qq.js` | 设置或清除群待办 |
+
+```js
+if (typeof sysMethod.getQqUserInfo === 'function') {
+  const info = await sysMethod.getQqUserInfo('123456');
+  console.log(info);
+}
+```
+
+---
+
 ## 三、BncrDB — 数据库
 
-Bncr 内置轻量 K-V 数据库，支持 Nedb（默认）和 Level 两种后端，数据按"表名"隔离。
+Bncr 内置轻量 K-V 数据库，支持 NeDB 和 Level 两种后端，数据按“表名”隔离。
+默认后端由框架当前运行环境决定（新版本常见为 Level）。
 
 ---
 
@@ -740,15 +789,16 @@ const db = new BncrDB(name, opt?)
 ```
 参数：
   name              string   数据表名称（同名实例共享数据）
-  opt.registerName  string   注册到全局的名字（可选）
-  opt.useMiddlewarePath  string  数据库中间件路径（可选）
-                            'db/Nedb.ts'  — 使用 NeDB（默认）
+  opt               object   可选；自定义数据库实例或 DatabaseInstantiationObject 中的已注册实例信息
+  opt.registerName  string   第二参数存在时必填，注册到全局的名字
+  opt.useMiddlewarePath  string  第二参数存在时必填，数据库中间件路径
+                            'db/Nedb.ts'  — 使用 NeDB
                             'db/Level.ts' — 使用 LevelDB
-  opt.db            object   自定义数据库实例（可选）
+  opt.db            object   自定义数据库实例（可选；复用已注册实例时由框架对象提供）
 ```
 
 ```js
-// 使用默认 NeDB，表名为 'myPlugin'
+// 使用系统默认数据库（当前多数部署为 Level），表名为 'myPlugin'
 const db = new BncrDB('myPlugin');
 
 // 使用自定义 Level 实例
@@ -774,7 +824,7 @@ const db = new BncrDB('myPlugin', {
 参数：
   key   string   要读取的键名
   def   any      可选，key 不存在时返回的默认值
-  bool  boolean  可选，传 true 时返回原始数据详情（含元数据）
+  bool  boolean  可选，传 true 时返回原始数据详情（仅 NeDB 中间件有效）
 
 返回值：Promise<any>
   - key 存在：返回存储的值
@@ -794,9 +844,11 @@ const name = await db.get('userName', 'defaultUser');
 // 读取对象（带泛型，TypeScript 用）
 const config = await db.get<{ host: string; port: number }>('redisConfig');
 
-// 读取原始数据详情
+// 读取原始数据详情（仅 NeDB 中间件有效）
 const raw = await db.get('myKey', undefined, true);
 ```
+
+> 说明：使用 Level 中间件时，`bool` 参数通常会被忽略，返回值仍是存储值本身。
 
 ---
 
@@ -809,7 +861,7 @@ const raw = await db.get('myKey', undefined, true);
   key         string   键名
   value       any      要存储的值（支持字符串、数字、对象、数组等）
   opt.def     any      可选，设置成功后的返回值（代替 true）
-  opt.password  string  可选，给该条数据加密保护
+  opt.password  string  可选，类型声明保留该字段；当前 Level 运行时不提供加密或读取保护
 
 返回值：Promise<boolean | any>
   - 成功且无 def：返回 true
@@ -832,8 +884,8 @@ await db.set('blackList', ['user1', 'user2']);
 // 存储成功后返回指定值
 const savedVal = await db.set('count', 100, { def: 100 }); // 返回 100
 
-// 加密存储（读取时也需要密码）
-await db.set('secretKey', 'abc123', { password: 'myPwd' });
+// 普通写入：当前运行时不要把 opt.password 当作加密能力使用
+await db.set('apiToken', 'plainTextValue');
 ```
 
 ---
@@ -845,12 +897,13 @@ await db.set('secretKey', 'abc123', { password: 'myPwd' });
 ```
 参数：
   key   string   要删除的键名
-  def   any      可选，key 不存在时返回的值（代替 false）
+  def   any      可选，删除成功后的返回值（代替 true）；key 不存在时仍返回 false
 
 返回值：Promise<boolean | any>
-  - 删除成功：返回 true
-  - key 不存在 + 无 def：返回 false
-  - key 不存在 + 有 def：返回 def
+  - key 存在且删除成功 + 无 def：返回 true
+  - key 存在且删除成功 + 有 def：返回 def
+  - key 不存在：返回 false
+  - 删除失败：返回 false
 ```
 
 ```js
@@ -859,7 +912,7 @@ const db = new BncrDB('myPlugin');
 // 删除
 const ok = await db.del('userName'); // true or false
 
-// 带默认值（不存在时返回 null 而不是 false）
+// 带默认值（存在并删除成功时返回 null；不存在仍返回 false）
 const result = await db.del('userName', null);
 ```
 
@@ -907,7 +960,7 @@ const tables = await db.getAllForm();
 
 ### 3.7 `watch(watchInfo)`
 
-**作用：** 监听某个 key 的写入或删除操作，可在变更前拦截并修改或阻止。
+**作用：** 监听某个 key 的写入或删除操作，可在变更前阻止本次操作。
 
 ```
 参数：
@@ -917,7 +970,7 @@ const tables = await db.getAllForm();
     method.newValue           any     拦截到的新值（set 事件时）
     method.eventType          string  事件类型：'set' 或 'del'
     method.stop()             void    调用后阻止本次写入/删除
-    method.changeValue(val)   void    调用后将写入值替换为 val
+    method.changeValue(val)   void    运行时存在；当前 Level 运行时不要用它改最终写入值，需要改值请 stop 后另行 set
   watchInfo.password  string    可选，后续修改/移除监听器需要此密码
 
 返回值：boolean（注册成功返回 true）
@@ -935,13 +988,11 @@ db.watch({
       const newVal = method.newValue;
       console.log('count 即将被设置为:', newVal);
 
-      // 拦截并强制改为最大值 100
+      // 超过上限时阻止本次写入；需要修正值时请另行 set 一个明确的值
       if (newVal > 100) {
-        method.changeValue(100);
+        method.stop();
       }
 
-      // 阻止本次写入（什么都不存）
-      // method.stop();
     }
 
     if (method.eventType === 'del') {
@@ -976,9 +1027,41 @@ db.unWatch({ id: 'secureWatcher', key: 'token', password: 'myPwd' });
 
 ---
 
+### 3.9 跨数据库实例读取（重点）
+
+`new BncrDB('xxx')` 不传第二参数时，使用的是系统默认数据库。
+如果你要读取其他实例（例如 `pluginConfig` 库），应传入 `DatabaseInstantiationObject` 中对应实例。
+
+```js
+// 读取插件配置库（pluginConfig）中的某个插件配置
+const pluginConfigInfo = DatabaseInstantiationObject?.['pluginConfig'];
+if (!pluginConfigInfo) {
+  throw new Error('pluginConfig 数据库实例未注册，不能回退到默认库读取');
+}
+
+const pluginCfgDB = new BncrDB('PluginConfig', pluginConfigInfo);
+const cfgKey = '/plugins/mourG/ck检测.js';
+const ckCheckConfig = await pluginCfgDB.get(cfgKey, {});
+const dailyPushLimit = Number(ckCheckConfig?.dailyPushLimit ?? 50);
+```
+
+```js
+// 错误写法：这会读取默认数据库里的 PluginConfig 表，不是 pluginConfig 数据库实例
+const wrongDB = new BncrDB('PluginConfig');
+```
+
+注意：
+- `DatabaseInstantiationObject['pluginConfig']` 需要框架已注册该实例。
+- 不能用 `new BncrDB('PluginConfig')` 代替上面的写法，否则读取的是默认数据库，容易出现“读不到配置”或“读错库”的问题。
+- 插件配置的 key 通常是插件文件相对工作目录路径（如 `/plugins/xxx/xxx.js`）。
+- 读取不到时建议提供默认值，不要直接假设字段存在。
+
+---
+
 ## 四、Sender — 插件上下文对象
 
 每次插件被触发时，框架将 `Sender` 实例作为第一个参数传入，通常命名为 `s`。
+当前运行时 `Sender` 原型方法包含 `reply`、`again`、`delMsg`、`waitInput`、`inlineSugar`、`param`、`getMsg`、`setMsg`、`getMsgId`、`getUserId`、`getUserName`、`getGroupId`、`getGroupName`、`getFrom`、`isAdmin`，实例字段包含 `Bridge`，并可通过 `msgInfo` 访问原始消息体。
 
 ```js
 module.exports = async (s) => {
@@ -1363,31 +1446,43 @@ await s.again({ type: 'text', msg: '你好' });  // again 需要完整 replyInfo
 
 ---
 
-### 4.16 `isWaitDel(argsArr)`
+### 4.16 `msgInfo`
 
-框架内部辅助方法，由 `delMsg()` 自动调用，**插件开发者无需直接使用**。
-功能：检查传入的参数数组中最后一个元素是否为 `{ wait: number }` 格式的延迟配置对象。
-若最后一个参数是 `{ wait: N }` 对象，则将撤回操作延迟 N 秒执行并从参数中移除该配置；
-否则立即执行撤回，返回原始参数数组。
+**作用：** 读取当前消息的原始消息体。需要一次性拿到完整平台消息字段时使用；普通业务优先用 `getMsg()`、`getUserId()` 等封装方法。
 
 ```
-参数：
-  argsArr  any[]  delMsg 接收到的原始参数数组
-
-返回值：Promise<any[]>  处理后的消息 ID 数组（已剔除 wait 配置对象）
+类型：msgInter
 ```
 
 ```js
-// 以下均由 delMsg 内部调用，插件中直接使用 delMsg 即可：
-await s.delMsg(msgId);               // 立即撤回
-await s.delMsg(msgId, { wait: 5 }); // 延迟 5 秒撤回（isWaitDel 自动处理）
+const info = s.msgInfo;
+console.log(info.userId, info.groupId, info.msg, info.msgId);
 ```
+
+---
+
+### 4.17 `Bridge`
+
+**作用：** 指向当前消息所属适配器的底层桥接对象。框架用它完成回复、撤回、推送等操作。
+
+```
+类型：object
+```
+
+```js
+// 只读检查当前消息是否有关联适配器桥
+if (!s.Bridge) {
+  await s.reply('当前消息没有可用适配器桥');
+}
+```
+
+> 普通插件不要直接改写 `s.Bridge`；发送消息请使用 `s.reply()`、`s.again()`、`s.delMsg()`。
 
 ---
 
 ## 五、BncrPluginConfig — 插件配置
 
-用于读取用户在 Web 管理面板中填写的插件配置。
+用于读取、写入、删除当前插件在 Web 管理面板中的配置。配置持久化在 `pluginConfig` 数据库实例中，key 由框架按当前插件文件路径生成。
 
 ### 构造函数
 
@@ -1405,33 +1500,78 @@ const ConfigDB = new BncrPluginConfig(jsonSchema)
 
 | 属性 | 类型 | 说明 |
 |------|------|------|
-| `ConfigDB.userConfig` | `object` | 用户填写的配置，调用 get() 后可用 |
+| `ConfigDB.userConfig` | `object` | 用户填写的配置；`get()` 后会刷新该值，`set()` 会写入该值 |
 | `ConfigDB.jsonSchema` | `object` | 传入的 JSON Schema 原始对象 |
+| `ConfigDB.defaultConfig` | `object` | 从 Schema 默认值生成的默认配置 |
+| `ConfigDB.filename` | `string` | 当前插件文件路径，作为插件配置存储 key |
+| `ConfigDB.initStatus` | `boolean` | 当前配置对象的初始化状态 |
 
 
 ### 方法
 
-#### `ConfigDB.get(key?)`
+运行时原型包含 `get()`、`set()`、`del()`，并通过 `userConfig` 访问当前配置对象。
 
-**作用：** 从数据库拉取用户配置并填充到 `userConfig`。一般在插件/模块初始化时调用一次。
+#### `ConfigDB.get()`
+
+**作用：** 从 `pluginConfig` 数据库拉取当前插件的用户配置，填充 `ConfigDB.userConfig`，并返回配置对象。一般在插件/模块初始化时调用一次。
 
 ```
-参数：
-  key  string  可选，获取特定配置键的值
+参数：无
 
-返回值：Promise<any>
+返回值：Promise<object>
 ```
 
 ```js
-const jsonSchema = BncrCreateSchema.object({ ... });
+const jsonSchema = BncrCreateSchema.object({
+  enable: BncrCreateSchema.boolean().setTitle('启用').setDefault(false),
+  host: BncrCreateSchema.string().setTitle('服务地址').setDefault('')
+});
 const ConfigDB = new BncrPluginConfig(jsonSchema);
 
 // 初始化时拉取配置（模块加载时调用）
-await ConfigDB.get();
+const config = await ConfigDB.get();
 
 // 之后可直接使用
-const { host, port, password } = ConfigDB.userConfig;
+const { enable, host } = ConfigDB.userConfig;
 ```
+
+#### `ConfigDB.set()`
+
+**作用：** 将当前 `ConfigDB.userConfig` 写回 `pluginConfig` 数据库。
+
+```
+参数：无
+
+返回值：Promise<void>
+抛错：当 userConfig 为空对象时会抛出异常；删除配置请用 del()
+```
+
+```js
+await ConfigDB.get();
+
+ConfigDB.userConfig.enable = true;
+ConfigDB.userConfig.host = 'http://127.0.0.1:8080';
+
+await ConfigDB.set();
+```
+
+#### `ConfigDB.del()`
+
+**作用：** 删除当前插件文件路径对应的用户配置。
+
+```
+参数：无
+
+返回值：Promise<void>
+```
+
+```js
+// 重置当前插件配置
+await ConfigDB.del();
+await ConfigDB.get();
+```
+
+> `set()`、`del()` 会直接修改 Web 面板配置存储；普通插件通常只需要 `get()` 读取配置，配置迁移或重置场景才写入/删除。
 
 ---
 
@@ -1444,10 +1584,11 @@ const { host, port, password } = ConfigDB.userConfig;
 
 | 方法 | 说明 |
 |------|------|
-| `BncrCreateSchema.object(properties?)` | 创建对象类型 Schema |
+| `BncrCreateSchema.object(properties?)` | 创建对象类型 Schema，`properties` 为字段字典 |
 | `BncrCreateSchema.string()` | 创建字符串字段 |
 | `BncrCreateSchema.number()` | 创建数字字段 |
-| `BncrCreateSchema.array(items)` | 创建数组字段，items 为元素类型 |
+| `BncrCreateSchema.boolean()` | 创建布尔字段，常用于开关配置 |
+| `BncrCreateSchema.array(items)` | 创建数组字段，`items` 为元素类型 Schema |
 
 
 ### 链式方法（所有类型通用）
@@ -1460,6 +1601,27 @@ const { host, port, password } = ConfigDB.userConfig;
 | `.setDefault(val)` | any | 设置字段默认值 |
 | `.setEnum(arr)` | any[] | 限定可选值列表（下拉框） |
 | `.setEnumNames(arr)` | string[] | 枚举值对应的显示名称 |
+| `.getDataType()` | 无 | 返回当前 Schema 对象的 `type` 值 |
+
+### 生成结构
+
+```js
+const schema = BncrCreateSchema.object({
+  name: BncrCreateSchema.string().setTitle('名称')
+});
+
+console.log(schema);
+// {
+//   type: 'object',
+//   properties: {
+//     name: { type: 'string', title: '名称' }
+//   }
+// }
+
+const listSchema = BncrCreateSchema.array(BncrCreateSchema.string());
+console.log(listSchema);
+// { type: 'array', items: { type: 'string' } }
+```
 
 
 ### 完整示例
@@ -1483,12 +1645,10 @@ const jsonSchema = BncrCreateSchema.object({
     .setTitle('Redis 密码')
     .setDescription('没有密码留空'),
 
-  // 下拉选择框
-  redis_open: BncrCreateSchema.string()
+  // 开关
+  redis_open: BncrCreateSchema.boolean()
     .setTitle('是否启用 Redis')
-    .setEnum(['true', 'false'])
-    .setEnumNames(['启用', '禁用'])
-    .setDefault('false'),
+    .setDefault(false),
 
   // 数字类型的索引
   redis_index: BncrCreateSchema.number()
@@ -1523,7 +1683,15 @@ const adapter = new Adapter('platformName')
   AdapterName  string  适配器/平台标识名称
 ```
 
-### 方法
+### 运行时成员
+
+当前运行时 `Adapter` 原型方法为 `receive()` 和 `isAdmin()`。发送相关能力由具体适配器实例实现：`reply()`、`push()`、`delMsg()`；官方 `ssh`、`tgBot`、`qq`、`HumanTG`、`web` 适配器都是这种写法。
+
+| 成员 | 类型 | 说明 |
+|------|------|------|
+| `adapter.name` | `string` | 平台标识，来自构造函数参数 |
+| `adapter.receive(msgInfo)` | `Function` | 接收外部平台消息并交给框架处理 |
+| `adapter.isAdmin()` | `Function` | 框架内部管理员判断入口 |
 
 #### `adapter.receive(msgInfo)`
 
@@ -1548,10 +1716,24 @@ adapter.receive({
 });
 ```
 
+#### `adapter.isAdmin()`
+
+**作用：** 运行时原型存在的管理员判断方法，框架内部会在消息处理时使用。普通自定义适配器一般不需要直接调用；如果要覆盖管理员逻辑，应先确认当前版本实现。
+
+```
+参数：无
+
+返回值：以当前运行时实现为准
+```
+
+### 适配器实例需要实现的方法
+
+这些方法由具体适配器给实例赋值，不在 `Adapter.prototype` 上。自定义适配器需要按目标平台能力实现。
+
 #### `adapter.reply(replyInfo)`
 
 框架调用此方法将消息发送给用户。
-在自定义适配器中，你需要**重写（覆盖）**此方法，实现将 replyInfo 转换成目标平台 API 调用的逻辑。
+在自定义适配器中，你需要给实例赋值此方法，实现将 replyInfo 转换成目标平台 API 调用的逻辑。
 每当插件调用 `s.reply()` 时，框架最终会调用你的适配器的 `reply()` 方法。
 
 ```
@@ -1586,9 +1768,19 @@ adapter.receive({
 返回值：Promise<void>
 ```
 
+### 官方适配器实例扩展
+
+| 适配器 | 实例扩展 |
+|--------|----------|
+| `ssh` | `reply`、`push` |
+| `tgBot` | `reply`、`push`、`delMsg` |
+| `qq` | `reply`、`push`、`delMsg`、`inlinemask`、`callApi`、`getUserInfo`、`getGroupInfo`、`setEssenceMessage`、`delEssenceMessage`、`setGroupTodo` |
+| `HumanTG` | `reply`、`push`、`delMsg`、`inlinemask` |
+| `web` | `reply`、`push`、`delMsg` |
+
 ### 完整自定义适配器示例
 
-参考官方 ssh 适配器（`sampleFile/Adapter/ssh.js`）的写法：
+参考官方适配器（如 `/bncr/BncrData/Adapter/ssh.js`）的写法：
 
 ```js
 /**
@@ -1656,6 +1848,22 @@ module.exports = async () => {
 
 框架将 Express Router 实例暴露为全局 `router`，可在插件中直接注册 HTTP 接口。
 
+### 方法列表
+
+| 方法 | 说明 |
+|------|------|
+| `router.get(path, handler)` | 注册 GET 路由 |
+| `router.post(path, handler)` | 注册 POST 路由 |
+| `router.put(path, handler)` | 注册 PUT 路由 |
+| `router.delete(path, handler)` | 注册 DELETE 路由 |
+| `router.patch(path, handler)` | 注册 PATCH 路由 |
+| `router.all(path, handler)` | 注册所有 HTTP 方法路由 |
+| `router.use(path?, middleware)` | 注册中间件或子路由 |
+| `router.ws(path, callback)` | 注册 WebSocket 路由 |
+| `router.addBncrHandleRawBodyPath(path)` | 将指定路由加入原始 body 处理列表 |
+| `router.deleteBncrHandleRawBodyPath(path)` | 从原始 body 处理列表移除指定路由 |
+| `router.getAllBncrHandleRawBodyPath()` | 获取当前原始 body 路由列表 |
+
 ### 基础用法
 
 ```js
@@ -1679,8 +1887,17 @@ router.post('/myPlugin/save', async (req, res) => {
 
 **作用：** 声明该路由需要在 `req` 中携带原始 body（`req.bncrHandleRawBody`），用于需要验证签名的 Webhook。
 
+```
+参数：
+  path  string  路由路径
+
+返回值：void
+```
+
+路径会按当前运行时规则转为小写保存；例如传入 `/Webhook/GitHub` 后，列表中保存为 `/webhook/github`。
+
 ```js
-router.addBncrHandleRawBodyPath('/webhook/github');
+router.addBncrHandleRawBodyPath('/Webhook/GitHub');
 router.post('/webhook/github', (req, res) => {
   const rawBody = req.bncrHandleRawBody; // Buffer 原始数据
   // 验证签名...
@@ -1690,6 +1907,13 @@ router.post('/webhook/github', (req, res) => {
 #### `router.deleteBncrHandleRawBodyPath(path)`
 
 **作用：** 移除某路由的原始 body 处理。
+
+```
+参数：
+  path  string  路由路径，按小写匹配
+
+返回值：void
+```
 
 ```js
 router.deleteBncrHandleRawBodyPath('/webhook/github');
@@ -1701,6 +1925,11 @@ router.deleteBncrHandleRawBodyPath('/webhook/github');
 
 ```
 返回值：string[]
+```
+
+```js
+const rawBodyPaths = router.getAllBncrHandleRawBodyPath();
+console.log(rawBodyPaths);
 ```
 
 #### `router.ws(path, callback)`
@@ -1719,7 +1948,7 @@ router.ws('/myPlugin/ws', (ws) => {
 
 ## 九、RunningInformation — 运行信息
 
-全局对象，记录框架各模块的实时运行状态与统计数据。**只读**，不要向其写入。
+全局对象，记录框架各模块的实时运行状态与统计数据。除 `BncrCache` 这类明确用于缓存的字段外，其他运行信息应按只读处理，不要手动覆盖。
 
 ### `AdapterTriggerRecord`
 
@@ -1821,6 +2050,19 @@ if (myPlugin) {
 
 ---
 
+### `RunningInformation.getPlugInfo(key)`
+
+运行时存在的插件信息查询方法。它和 `RunningInformation.getLoadingPlugInfo()` 都属于框架运行信息查询接口；具体返回结构可能随当前框架实现变化，业务插件只建议做只读查询。
+
+```
+参数：
+  key  string  插件标识，或按当前运行时支持的特殊 key 查询
+
+返回值：以当前运行时实现为准
+```
+
+---
+
 ### `BncrCache`
 
 框架全局缓存对象，key-value 结构，可用于在不同插件或模块间共享运行时数据。
@@ -1858,6 +2100,7 @@ if (storage[pluginPath]) {
 | `AdapterTriggerRecord` | `object` | 各平台适配器的消息收发统计 |
 | `getAdapterInfo(key)` | `Function` | 获取适配器详情，传 `'all'` 返回全部 |
 | `getLoadingPlugInfo(key)` | `Function` | 获取已加载插件信息，传 `'all'` 返回全部 |
+| `getPlugInfo(key)` | `Function` | 运行时存在的插件信息查询方法，返回以当前实现为准 |
 | `BncrCache` | `object` | 框架运行时缓存，重启清空 |
 | `AllPluginConfigStorage` | `object` | 所有插件的 Schema + 用户配置存储 |
 
@@ -1866,9 +2109,10 @@ if (storage[pluginPath]) {
 
 ## 十、DatabaseInstantiationObject — 数据库实例注册表
 
-全局只读对象，存储所有通过 `new BncrDB(name, { registerName })` 创建并注册的数据库实例配置。
+全局只读对象，存储框架已注册的数据库实例配置，包含框架内置实例（例如 `pluginConfig`）和你通过 `new BncrDB(name, { registerName })` 注册的自定义实例。
 每当你用 `registerName` 选项创建 `BncrDB` 时，该实例的配置信息会自动注册到此对象，
 方便在其他模块中复用同一数据库实例，避免重复创建。
+当前运行时内置注册名包含 `user` 和 `pluginConfig`。
 
 ```
 结构：
@@ -1883,6 +2127,8 @@ if (storage[pluginPath]) {
 // 注册一个自定义 Level 数据库
 import { Level } from 'level';
 import path from 'path';
+
+const log = BncrJSLogger;
 
 const MyDB = new Level(path.join(process.cwd(), 'BncrData/db/mySharedDB'), {
   valueEncoding: 'json'
@@ -1903,7 +2149,22 @@ if (existing) {
 }
 ```
 
+```js
+const log = BncrJSLogger;
+
+// 常见场景：读取 pluginConfig 库（插件配置存储）
+const pluginConfigInfo = DatabaseInstantiationObject['pluginConfig'];
+if (!pluginConfigInfo) {
+  throw new Error('pluginConfig 数据库实例未注册');
+}
+
+const pluginCfgDB = new BncrDB('PluginConfig', pluginConfigInfo);
+const cfg = await pluginCfgDB.get('/plugins/mourG/ck检测.js', {});
+log.info('ck检测配置:', cfg);
+```
+
 > **注意：** 无需手动修改此对象，框架会在 `new BncrDB()` 时自动维护。
+> 读取 `pluginConfig` 等非默认库时，不能省略 `new BncrDB()` 的第二参数。
 
 ---
 
@@ -2184,6 +2445,8 @@ export async function getPluginsContent(userInfo, pluginsInfo) {
 
 `BncrDB` 底层由 `systemDB` 类实现，一般不直接使用，但可用于高级场景。
 
+底层 `_delDb()` 的实际返回约定为：删除成功返回 `true`，发生异常返回 `false`，目标 key 不存在返回 `undefined`。
+
 ### Nedb 中间件 (`db/Nedb.ts`)
 
 ```typescript
@@ -2197,13 +2460,13 @@ class systemDB {
   async _update(key: string, value: string): Promise<boolean>
 
   // 删除
-  async _delDb(key: string): Promise<void>
+  async _delDb(key: string): Promise<boolean | undefined>
 
   // 查单条（bool=true 返回原始记录含元数据）
   async _find(key: string, bool?: boolean): Promise<any>
 
   // 查多条（不传 key 时返回全表）
-  async _finds(key?: string): Promise<any>
+  async _finds(key?: string): Promise<any[]>
 
   // 查所有表名
   async _findAllFrom(): Promise<string[]>
@@ -2223,7 +2486,8 @@ class systemDB {
   constructor(name: string, diyDB?: Level<string, any>)
 
   async _update(key: string, value: string): Promise<boolean>
-  async _delDb(key: string): Promise<void>
+  async _delDb(key: string): Promise<boolean | undefined>
+  // bool 参数在 Level 中间件中会被忽略
   async _find(key: string, bool?: boolean): Promise<any>
   async _findAllFrom(): Promise<string[]>
   async _keys(): Promise<string[]>
@@ -2288,6 +2552,7 @@ module.exports = async (s) => {
  */
 module.exports = async () => {
   const db = new BncrDB('dailyReport');
+  const log = BncrJSLogger;
 
   // 每天早上 8 点发报告
   sysMethod.cron.newCron('0 0 8 * * *', async () => {
@@ -2326,6 +2591,7 @@ module.exports = async () => {
  */
 module.exports = async () => {
   const db = new BncrDB('myApiData');
+  const log = BncrJSLogger;
 
   // 需要登录才能访问的接口
   router.get('/myApi/getData', async (req, res) => {
@@ -2365,7 +2631,7 @@ module.exports = async () => {
  * @disable     false
  * @classification ["工具"]
  */
-const log = BncrJSLogger || require('log4js').getLogger('myUtils');
+const log = BncrJSLogger;
 const db = new BncrDB('myUtils');
 
 async function getConfig() {
@@ -2411,7 +2677,7 @@ module.exports = async (s) => {
  */
 module.exports = async () => {
   const db = new BncrDB('config');
-  const log = BncrJSLogger || require('log4js').getLogger('configWatcher');
+  const log = BncrJSLogger;
 
   db.watch({
     id: 'configWatcher',
@@ -2420,8 +2686,9 @@ module.exports = async () => {
       if (method.eventType === 'set') {
         const val = parseInt(method.newValue);
         if (val > 1000) {
-          log.warn(`maxUsers 超过上限，已自动修正为 1000`);
-          method.changeValue(1000);
+          log.warn('maxUsers 超过上限，已阻止本次写入');
+          method.stop();
+          return;
         }
         log.info(`maxUsers 已更新为: ${method.newValue}`);
       }
